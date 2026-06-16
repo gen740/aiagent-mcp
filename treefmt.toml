@@ -1,0 +1,5 @@
+[formatter.ruff]
+command = "ruff"
+options = ["format"]
+includes = ["*.py"]
+
