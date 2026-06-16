@@ -7,6 +7,7 @@ import mimetypes
 import os
 import shutil
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -268,6 +269,7 @@ def build_tree(
     depth: int,
     max_entries: int,
     counter: dict[str, int],
+    visited_directories: set[Path],
 ) -> list[dict[str, Any]]:
     if max_entries < 1:
         raise ToolError("maxResults must be at least 1")
@@ -288,22 +290,28 @@ def build_tree(
         except ToolError:
             continue
 
+        is_directory = child.is_dir()
         item: dict[str, Any] = {
             "name": child.name,
-            "type": "directory" if child.is_dir() else "file",
+            "type": "directory" if is_directory else "file",
         }
         counter["count"] += 1
-        if child.is_dir():
-            item["children"] = build_tree(
-                root,
-                child,
-                guard,
-                excludes,
-                max_depth,
-                depth + 1,
-                max_entries,
-                counter,
-            )
+        if is_directory:
+            real_directory = child.resolve(strict=True)
+            if real_directory in visited_directories:
+                item["children"] = []
+            else:
+                item["children"] = build_tree(
+                    root,
+                    child,
+                    guard,
+                    excludes,
+                    max_depth,
+                    depth + 1,
+                    max_entries,
+                    counter,
+                    visited_directories | {real_directory},
+                )
         entries.append(item)
     return entries
 
@@ -343,7 +351,9 @@ def run_process(
             exit_code = completed.returncode
         except subprocess.TimeoutExpired:
             exit_code = 124
-            stderr.write(f"\nCommand timed out after {timeout_seconds} seconds\n".encode())
+            stderr.write(
+                f"\nCommand timed out after {timeout_seconds} seconds\n".encode()
+            )
 
         stdout_text, stdout_truncated = read_limited_output(stdout)
         stderr_text, stderr_truncated = read_limited_output(stderr)
@@ -365,19 +375,27 @@ def run_shell_process(
 ) -> dict[str, Any]:
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=cwd,
                 env=env,
                 shell=True,
                 stdout=stdout,
                 stderr=stderr,
-                timeout=timeout_seconds,
+                start_new_session=True,
             )
-            exit_code = completed.returncode
+            process.wait(timeout=timeout_seconds)
+            exit_code = process.returncode
         except subprocess.TimeoutExpired:
             exit_code = 124
-            stderr.write(f"\nCommand timed out after {timeout_seconds} seconds\n".encode())
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            stderr.write(
+                f"\nCommand timed out after {timeout_seconds} seconds\n".encode()
+            )
 
         stdout_text, stdout_truncated = read_limited_output(stdout)
         stderr_text, stderr_truncated = read_limited_output(stderr)
@@ -709,6 +727,7 @@ def fs_tree(
             0,
             maxResults,
             counter,
+            {root.resolve(strict=True)},
         ),
         "truncated": bool(counter["truncated"]),
     }

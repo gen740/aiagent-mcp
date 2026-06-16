@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import anyio
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -121,6 +122,41 @@ async def run_smoke() -> None:
                 assert tree_result.structuredContent is not None
                 assert len(tree_result.structuredContent["tree"]) == 1
 
+                os.mkdir(Path(tmp) / "real-dir")
+                (Path(tmp) / "real-dir" / "nested.txt").write_text(
+                    "nested\n", encoding="utf-8"
+                )
+                os.symlink(Path(tmp) / "real-dir", Path(tmp) / "linked-dir")
+                list_result = await session.call_tool("fs-list", {"path": tmp})
+                assert list_result.structuredContent is not None
+                assert "[DIR] linked-dir" in list_result.structuredContent["content"]
+                tree_symlink_result = await session.call_tool(
+                    "fs-tree", {"path": tmp, "maxDepth": 2}
+                )
+                assert tree_symlink_result.structuredContent is not None
+                linked_dir = next(
+                    item
+                    for item in tree_symlink_result.structuredContent["tree"]
+                    if item["name"] == "linked-dir"
+                )
+                assert linked_dir["type"] == "directory"
+                assert "children" in linked_dir
+                os.symlink(Path(tmp), Path(tmp) / "self-link")
+                tree_cycle_result = await session.call_tool(
+                    "fs-tree", {"path": tmp, "maxResults": 100}
+                )
+                assert tree_cycle_result.structuredContent is not None
+                self_link = next(
+                    item
+                    for item in tree_cycle_result.structuredContent["tree"]
+                    if item["name"] == "self-link"
+                )
+                assert self_link == {
+                    "name": "self-link",
+                    "type": "directory",
+                    "children": [],
+                }
+
                 shell_result = await session.call_tool(
                     "shell-exec",
                     {"command": "printf ok", "cwd": tmp},
@@ -128,6 +164,44 @@ async def run_smoke() -> None:
                 assert shell_result.structuredContent is not None
                 assert shell_result.structuredContent["exitCode"] == 0
                 assert shell_result.structuredContent["stdout"] == "ok"
+
+                large_shell_result = await session.call_tool(
+                    "shell-exec",
+                    {"command": "yes x | head -c 3000000", "cwd": tmp},
+                )
+                assert large_shell_result.structuredContent is not None
+                assert large_shell_result.structuredContent["stdoutTruncated"] is True
+
+                timeout_marker = f"combined_mcp_timeout_{os.getpid()}"
+                timeout_command = (
+                    f"{shlex.quote(sys.executable)} -c "
+                    f"{shlex.quote('import time; time.sleep(30)')} "
+                    f"{timeout_marker}"
+                )
+                timeout_result = await session.call_tool(
+                    "shell-exec",
+                    {"command": timeout_command, "cwd": tmp, "timeoutSeconds": 1},
+                )
+                assert timeout_result.structuredContent is not None
+                assert timeout_result.structuredContent["exitCode"] == 124
+                await anyio.sleep(0.2)
+                ps_result = subprocess.run(
+                    ["ps", "ax", "-o", "pid=", "-o", "command="],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                leaked_pids = [
+                    int(line.strip().split(maxsplit=1)[0])
+                    for line in ps_result.stdout.splitlines()
+                    if timeout_marker in line and "ps ax" not in line
+                ]
+                for pid in leaked_pids:
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+                assert leaked_pids == []
 
                 patch = """diff --git a/hello.txt b/hello.txt
 --- a/hello.txt
@@ -138,10 +212,24 @@ async def run_smoke() -> None:
 """
                 patch_result = await session.call_tool(
                     "fs-patch",
-                    {"cwd": tmp, "patch": patch},
+                    {"cwd": tmp, "patch": patch, "dryRun": False},
                 )
                 assert patch_result.structuredContent is not None
                 assert patch_result.structuredContent["applied"] is True
+
+                default_patch = """diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello patched
++hello default patched
+"""
+                default_patch_result = await session.call_tool(
+                    "fs-patch",
+                    {"cwd": tmp, "patch": default_patch},
+                )
+                assert default_patch_result.structuredContent is not None
+                assert default_patch_result.structuredContent["applied"] is True
 
                 status_result = await session.call_tool(
                     "git-status", {"repo_path": tmp}

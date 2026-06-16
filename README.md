@@ -6,7 +6,7 @@ The filesystem behavior follows the same basic security model as `examples/serve
 
 ## Tools
 
-- `fs-read`: read a UTF-8 text file, with optional `head` or `tail`
+- `fs-read`: read a UTF-8 text file, capped at 2 MiB unless `head` or `tail` is used
 - `fs-read-binary`: read a file as base64 with a MIME type, capped at 10 MiB
 - `fs-write`: create or overwrite a UTF-8 text file
 - `fs-list`: list a directory
@@ -36,6 +36,8 @@ The filesystem behavior follows the same basic security model as `examples/serve
 - `git-stash-push`: stash changes
 - `git-stash-pop`: pop a stash entry
 - `shell-exec`: run a shell command in an allowed `cwd`
+
+Process-backed tools cap stdout and stderr at 2 MiB each and report truncation flags.
 
 ## Run Locally
 
